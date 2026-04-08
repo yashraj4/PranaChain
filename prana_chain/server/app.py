@@ -99,6 +99,8 @@ def root():
     let obs = null;
     let stepN = 0;
     let auto = null;
+    let isDone = false;
+    let lastReward = 0;
 
     function addLog(msg) {
       const el = document.getElementById('log');
@@ -111,8 +113,8 @@ def root():
     function render() {
       if (!obs) return;
       document.getElementById('step').textContent = String(stepN);
-      document.getElementById('reward').textContent = (Number(obs.reward || 0)).toFixed(2);
-      document.getElementById('done').textContent = String(Boolean(obs.done));
+      document.getElementById('reward').textContent = Number(lastReward || 0).toFixed(2);
+      document.getElementById('done').textContent = String(Boolean(isDone));
 
       const hb = document.querySelector('#hospTable tbody');
       hb.innerHTML = '';
@@ -138,6 +140,8 @@ def root():
       const data = await res.json();
       obs = data.observation;
       stepN = 0;
+      isDone = false;
+      lastReward = 0;
       document.getElementById('action').textContent = '-';
       addLog(`Reset task=${task}`);
       render();
@@ -157,16 +161,18 @@ def root():
     }
 
     async function stepPolicy() {
-      if (!obs || obs.done) return;
+      if (!obs || isDone) return;
       const action = chooseAction();
       const res = await fetch('/step', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action }) });
       const data = await res.json();
       obs = data.observation;
+      lastReward = Number(data.reward || 0);
+      isDone = Boolean(data.done);
       stepN += 1;
       document.getElementById('action').textContent = `${action.action_type}:${action.target_id}`;
-      addLog(`step=${stepN} action=${action.action_type}:${action.target_id} reward=${Number(obs.reward || 0).toFixed(2)} done=${obs.done}`);
+      addLog(`step=${stepN} action=${action.action_type}:${action.target_id} reward=${lastReward.toFixed(2)} done=${isDone}`);
       render();
-      if (obs.done && auto) toggleAuto();
+      if (isDone && auto) toggleAuto();
     }
 
     function toggleAuto() {
