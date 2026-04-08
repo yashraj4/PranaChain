@@ -14,6 +14,15 @@ app = create_app(
     # factory=True, # Optional: Create new environment per session
 )
 
+
+@app.get("/")
+def root():
+    return {
+        "name": "prana_chain",
+        "status": "ok",
+        "hint": "Use POST /reset, WebSocket /ws, and GET /health for OpenEnv interactions.",
+    }
+
 def main(host: str = "0.0.0.0", port: int = 8000):
     import uvicorn
     uvicorn.run(app, host=host, port=port)
