@@ -1,5 +1,4 @@
-# This file makes the environment a Python package.
-from .models import OxygenAction, OxygenObservation, OxygenState
-from .client import PranaChainClient
+from .prana_chain.client import PranaChainEnv
+from .prana_chain.models import OxygenAction, OxygenObservation, OxygenState
 
-__all__ = ["OxygenAction", "OxygenObservation", "OxygenState", "PranaChainClient"]
+__all__ = ["PranaChainEnv", "OxygenAction", "OxygenObservation", "OxygenState"]

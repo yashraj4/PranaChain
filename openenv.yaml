@@ -1,0 +1,17 @@
+name: prana_chain
+version: 0.1.0
+description: Autonomous oxygen triage and dynamic logistics simulation for hospital oxygen dispatch.
+entrypoint: prana_chain.server.app:app
+framework: openenv
+tags:
+  - openenv
+  - healthcare
+  - logistics
+  - triage
+tasks:
+  - id: easy
+    description: Stabilize two hospitals with one truck and one plant.
+  - id: medium
+    description: Coordinate four hospitals with two trucks and limited refill bandwidth.
+  - id: hard
+    description: Prevent cascading oxygen failures across six hospitals under system stress.

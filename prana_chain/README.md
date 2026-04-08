@@ -14,6 +14,8 @@ tags:
 
 Autonomous dynamic triage simulation designed for reinforcement-learning and LLM-agents, built on the OpenEnv framework.
 
+Prana-Chain models a real emergency-operations workflow: dispatch teams deciding how to route oxygen tankers between production plants and hospitals with continuously draining oxygen buffers.
+
 ## Table of Contents
 - [Why Prana-Chain?](#why-prana-chain)
 - [Quick Start](#quick-start)
@@ -31,6 +33,7 @@ Resource constraints during public health crises form devastating bottlenecks. L
 ### Using Docker
 ```bash
 docker build -t prana_chain-env:latest -f server/Dockerfile .
+docker run --rm -p 8000:8000 prana_chain-env:latest
 ```
 
 ### Basic Python Client
@@ -61,6 +64,15 @@ This environment models logistics physics tied explicitly to patient consumption
 - Hospitals: Drain oxygen continuously based on dynamic consumption rates.
 - Time-To-Zero (TTZ): If TTZ hits 0, it triggers a Zero-Oxygen event.
 - Fleet Dynamics: Trucks carry and deliver oxygen.
+- Episode horizon: max 30 steps.
+
+## OpenEnv API
+
+- `reset(task=...) -> OxygenObservation`
+- `step(OxygenAction) -> OxygenObservation`
+- `state -> OxygenState`
+
+`OxygenObservation` carries OpenEnv-standard fields (`reward`, `done`, `metadata`) and domain fields (`Hospitals`, `Fleet`, `Suppliers`, `message`).
 
 ## Actions
 
@@ -69,16 +81,65 @@ This environment models logistics physics tied explicitly to patient consumption
 2. DISPATCH_TO_PLANT - Route a truck back to refilling nodes.
 3. DIVERT_IN_TRANSIT - Rationing.
 
+Action schema fields:
+- `action_type`: one of `DELIVER_TO_HOSPITAL`, `DISPATCH_TO_PLANT`, `DIVERT_IN_TRANSIT`
+- `truck_id`: target truck id (default `Truck_1`)
+- `target_id`: hospital or plant id
+- `priority_level`: integer 1-10
+
 ## Observations
 
 ### OxygenObservation
 - Hospitals: List of hospital statuses (TTZ, SOS, etc.)
 - Fleet: truck positions and loads.
 - Suppliers: Plant stock levels.
+- message: textual status message
+- done: whether episode terminated
+- reward: normalized step reward in `[0, 1]`
 
 ## Reward Structure
 
 | Event | Reward |
 | --- | --- |
-| Supply Injection | +0.1 per liter |
-| Zero-Oxygen Event | -1000.0 |
+| Step safety ratio (hospitals > 100L) | +0.0 to +0.7 |
+| Average stock health ratio | +0.0 to +0.3 |
+| Repeated same action loop | -0.03 each repeated turn (capped) |
+| Any casualty event | immediate collapse to 0.0 |
+
+## Tasks and Graders
+
+Difficulty progression and deterministic graders are implemented in `graders.py`.
+
+- `easy`: keep 2 hospitals alive; lower required throughput.
+- `medium`: keep 4 hospitals alive and deliver more total oxygen.
+- `hard`: keep 6 hospitals alive with strict throughput requirement.
+
+Each task returns a final score in `[0.0, 1.0]` based on:
+- hospital survival ratio,
+- horizon durability (`step_count / max_steps`),
+- normalized delivery throughput (`total_delivered / target_liters`),
+- zero score on casualties.
+
+## Baseline Inference
+
+Root script: `../inference.py`
+
+Required env vars:
+- `HF_TOKEN`
+- `API_BASE_URL` (default `https://router.huggingface.co/v1`)
+- `MODEL_NAME` (default `Qwen/Qwen2.5-72B-Instruct`)
+
+Run:
+```bash
+python ../inference.py
+```
+
+The script emits strict structured logs:
+- `[START]`
+- `[STEP]`
+- `[END]`
+
+## Hugging Face Spaces
+
+This repo is compatible with Docker Spaces and includes `server/Dockerfile`.
+Use Space SDK `docker`, expose port `8000`, and include the `openenv` tag.

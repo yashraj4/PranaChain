@@ -1,24 +1,24 @@
-from typing import List, Dict, Optional
-from pydantic import Field
+from typing import List, Dict, Optional, Literal
+from pydantic import Field, BaseModel
 from openenv.core.env_server import Action, Observation, State
 
-class HospitalStatus(Observation):
+class HospitalStatus(BaseModel):
     id: str
     current_o2_liters: float
     consumption_rate: float
-    time_to_zero: float  # Minutes until empty
+    time_to_zero: float
     critical_patients: int
     sos_alert: str
 
-class TruckStatus(Observation):
+class TruckStatus(BaseModel):
     id: str
     current_load: float
     capacity: float
-    location: str # "Plant_A" or "Hospital_B" or "In-Transit"
+    location: str
     target_destination: Optional[str]
-    status: str # "OFFLOADING", "LOADING", "IDLE", "TRANSIT"
+    status: str
 
-class SupplyNode(Observation):
+class SupplyNode(BaseModel):
     id: str
     available_stock: float
     replenishment_rate: float
@@ -30,7 +30,8 @@ class OxygenObservation(Observation):
     message: str
 
 class OxygenAction(Action):
-    action_type: str  # "DELIVER_TO_HOSPITAL", "DISPATCH_TO_PLANT", "DIVERT_IN_TRANSIT"
+    action_type: Literal["DELIVER_TO_HOSPITAL", "DISPATCH_TO_PLANT", "DIVERT_IN_TRANSIT"]
+    truck_id: str = "Truck_1"
     target_id: str
     priority_level: int = Field(default=5, ge=1, le=10)
 
@@ -40,3 +41,5 @@ class OxygenState(State):
     total_delivered: float = 0.0
     casualties: int = 0
     score: float = 0.0
+    episode_id: str
+    step_count: int

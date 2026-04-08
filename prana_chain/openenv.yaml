@@ -1,6 +1,12 @@
 name: prana_chain
 version: 0.1.0
 description: Autonomous oxygen triage and dynamic logistics simulation.
+entrypoint: server.app:app
+framework: openenv
+tags:
+  - logistics
+  - healthcare
+  - triage
 tasks:
   - id: easy
     description: Single hospital near exhaustion.

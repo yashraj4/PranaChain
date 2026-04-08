@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.venv/
+venv/
+
+*.log
+inference_output.log
+server_stdout.log
+server_stderr.log
+server_error.log
+
+.DS_Store
