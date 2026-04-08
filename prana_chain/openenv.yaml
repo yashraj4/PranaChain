@@ -1,0 +1,10 @@
+name: prana_chain
+version: 0.1.0
+description: Autonomous oxygen triage and dynamic logistics simulation.
+tasks:
+  - id: easy
+    description: Single hospital near exhaustion.
+  - id: medium
+    description: Multiple hospitals needing synchronized refills.
+  - id: hard
+    description: System-wide shortage with critical triage.
