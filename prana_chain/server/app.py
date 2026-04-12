@@ -48,7 +48,7 @@ def root():
 <body>
   <div class="wrap">
     <div class="title">Prana-Chain Live RL Visualization</div>
-    <div class="sub">Interactive real-time simulation view of actions, rewards, and hospital oxygen risk.</div>
+    <div class="sub">Fixed 12 hospital slots (active/inactive), dynamic beds &amp; consumption, delivery ETAs, slot events — with progressive rewards.</div>
 
     <div class="row">
       <div class="panel grow">
@@ -92,14 +92,14 @@ def root():
       <div class="panel grow">
         <h3>Hospitals</h3>
         <table id="hospTable">
-          <thead><tr><th>ID</th><th>O2</th><th>Rate</th><th>TTZ</th><th>SOS</th></tr></thead>
+          <thead><tr><th>ID</th><th>Active</th><th>Beds</th><th>O2</th><th>Rate</th><th>TTZ</th><th>SOS</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <div class="panel grow">
         <h3>Fleet</h3>
         <table id="fleetTable">
-          <thead><tr><th>ID</th><th>Load</th><th>Cap</th><th>Status</th><th>Target</th></tr></thead>
+          <thead><tr><th>ID</th><th>Load</th><th>Cap</th><th>Status</th><th>ETA</th><th>In-transit L</th><th>Target</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -136,8 +136,8 @@ def root():
       hb.innerHTML = '';
       (obs.Hospitals || []).forEach(h => {
         const tr = document.createElement('tr');
-        const ttzClass = h.time_to_zero < 6 ? 'bad' : (h.time_to_zero < 12 ? 'warn' : 'good');
-        tr.innerHTML = `<td>${h.id}</td><td>${h.current_o2_liters.toFixed(1)}</td><td>${h.consumption_rate.toFixed(1)}</td><td class="${ttzClass}">${h.time_to_zero.toFixed(1)}</td><td>${h.sos_alert}</td>`;
+        const ttzClass = !h.active ? 'muted' : (h.time_to_zero < 6 ? 'bad' : (h.time_to_zero < 12 ? 'warn' : 'good'));
+        tr.innerHTML = `<td>${h.id}</td><td>${h.active}</td><td>${h.beds ?? '-'}</td><td>${h.current_o2_liters.toFixed(1)}</td><td>${h.consumption_rate.toFixed(1)}</td><td class="${ttzClass}">${h.time_to_zero.toFixed(1)}</td><td>${h.sos_alert}</td>`;
         hb.appendChild(tr);
       });
 
@@ -145,7 +145,9 @@ def root():
       fb.innerHTML = '';
       (obs.Fleet || []).forEach(f => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${f.id}</td><td>${Number(f.current_load).toFixed(1)}</td><td>${Number(f.capacity).toFixed(1)}</td><td>${f.status}</td><td>${f.target_destination || '-'}</td>`;
+        const eta = (f.eta_steps != null && f.eta_steps > 0) ? String(f.eta_steps) : '-';
+        const lit = (f.in_transit_liters != null && f.in_transit_liters > 0) ? Number(f.in_transit_liters).toFixed(0) : '-';
+        tr.innerHTML = `<td>${f.id}</td><td>${Number(f.current_load).toFixed(1)}</td><td>${Number(f.capacity).toFixed(1)}</td><td>${f.status}</td><td>${eta}</td><td>${lit}</td><td>${f.target_destination || '-'}</td>`;
         fb.appendChild(tr);
       });
     }
@@ -172,16 +174,22 @@ def root():
     }
 
     function chooseAction() {
-      const hs = (obs && obs.Hospitals) ? obs.Hospitals.slice() : [];
-      const fleet = (obs && obs.Fleet && obs.Fleet[0]) ? obs.Fleet[0] : null;
-      if (!fleet || hs.length === 0) {
-        return { action_type: "DELIVER_TO_HOSPITAL", truck_id: "Truck_1", target_id: "Hospital_1", priority_level: 5 };
+      const fleetList = (obs && obs.Fleet) ? obs.Fleet : [];
+      const idle = fleetList.filter(f => f.status === 'IDLE');
+      const fleet = idle.length ? idle[0] : fleetList[0];
+      const tid = fleet ? fleet.id : 'Truck_1';
+      if (fleet && fleet.status !== 'IDLE') {
+        return { action_type: "DELIVER_TO_HOSPITAL", truck_id: tid, target_id: "Hospital_1", priority_level: 5 };
       }
-      if (Number(fleet.current_load || 0) < 1000) {
-        return { action_type: "DISPATCH_TO_PLANT", truck_id: fleet.id || "Truck_1", target_id: "Plant_1", priority_level: 5 };
+      const activeHs = (obs && obs.Hospitals) ? obs.Hospitals.filter(h => h.active) : [];
+      if (!fleet || activeHs.length === 0) {
+        return { action_type: "DISPATCH_TO_PLANT", truck_id: tid, target_id: "Plant_1", priority_level: 5 };
       }
-      hs.sort((a,b) => (a.time_to_zero - b.time_to_zero) || (a.current_o2_liters - b.current_o2_liters));
-      return { action_type: "DELIVER_TO_HOSPITAL", truck_id: fleet.id || "Truck_1", target_id: hs[0].id, priority_level: 8 };
+      if (Number(fleet.current_load || 0) < 1200) {
+        return { action_type: "DISPATCH_TO_PLANT", truck_id: tid, target_id: "Plant_1", priority_level: 5 };
+      }
+      activeHs.sort((a,b) => (a.time_to_zero - b.time_to_zero) || (a.current_o2_liters - b.current_o2_liters));
+      return { action_type: "DELIVER_TO_HOSPITAL", truck_id: tid, target_id: activeHs[0].id, priority_level: 8 };
     }
 
     async function stepPolicy() {

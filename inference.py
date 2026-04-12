@@ -11,6 +11,7 @@ from openai import OpenAI  # Fix 3: synchronous client, top-level import
 
 from prana_chain.client import PranaChainEnv
 from prana_chain.models import OxygenAction
+from prana_chain.graders import SCORE_MAX, SCORE_MIN
 
 # Read environment variables with defaults where required
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
@@ -48,11 +49,12 @@ def call_llm(obs) -> OxygenAction:
     FLEET: {obs.Fleet}
     SUPPLIERS: {obs.Suppliers}
 
-    Choose ONE action for Truck_1.
+    Choose ONE action for one truck: include truck_id (e.g. Truck_1) and target_id.
+    Only hospitals with active=true receive oxygen; inactive slots are closed.
+    Delivery takes multiple steps in transit (see Fleet eta_steps).
     Available actions: DELIVER_TO_HOSPITAL, DISPATCH_TO_PLANT.
-    Targets: Hospital_1, Hospital_2, ..., Plant_1, Plant_2, ...
 
-    Return ONLY a JSON object like: {{"action_type": "...", "target_id": "..."}}
+    Return ONLY a JSON object like: {{"action_type": "...", "target_id": "...", "truck_id": "Truck_1"}}
     """
 
     try:
@@ -69,16 +71,29 @@ def call_llm(obs) -> OxygenAction:
         # 1) Refill when truck is empty/low.
         # 2) Otherwise deliver to the most critical hospital.
         try:
-            truck = obs.Fleet[0]
-            if truck.current_load < 1000:
+            idle = [t for t in obs.Fleet if t.status == "IDLE"]
+            truck = idle[0] if idle else obs.Fleet[0]
+            tid = truck.id
+            if truck.status != "IDLE":
+                return OxygenAction(
+                    action_type="DELIVER_TO_HOSPITAL",
+                    truck_id=tid,
+                    target_id="Hospital_1",
+                )
+            if truck.current_load < 1200:
                 plant_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
-                return OxygenAction(action_type="DISPATCH_TO_PLANT", target_id=plant_id)
+                return OxygenAction(action_type="DISPATCH_TO_PLANT", truck_id=tid, target_id=plant_id)
 
-            critical = min(
-                obs.Hospitals,
-                key=lambda h: (h.time_to_zero, h.current_o2_liters),
+            active_hs = [h for h in obs.Hospitals if getattr(h, "active", True)]
+            if not active_hs:
+                plant_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
+                return OxygenAction(action_type="DISPATCH_TO_PLANT", truck_id=tid, target_id=plant_id)
+            critical = min(active_hs, key=lambda h: (h.time_to_zero, h.current_o2_liters))
+            return OxygenAction(
+                action_type="DELIVER_TO_HOSPITAL",
+                truck_id=tid,
+                target_id=critical.id,
             )
-            return OxygenAction(action_type="DELIVER_TO_HOSPITAL", target_id=critical.id)
         except Exception:
             return OxygenAction(action_type="DELIVER_TO_HOSPITAL", target_id="Hospital_1")
 
@@ -127,7 +142,7 @@ async def run_evaluation(task: str):
 
         # Final Grading
         state = await env.state()
-        score = max(0.0, min(1.0, float(state.score)))
+        score = max(SCORE_MIN, min(SCORE_MAX, float(state.score)))
         success = score >= 0.8
     except Exception as e:
         log_step(step=max(1, step_count + 1), action="ERROR", reward=0.0, done=True, error=str(e))

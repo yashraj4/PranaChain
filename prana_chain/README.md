@@ -47,9 +47,10 @@ async def main():
         print(f"Hospitals: {len(result.observation.Hospitals)}")
 
         action = OxygenAction(
-            action_type="DELIVER_TO_HOSPITAL", 
-            target_id="AIIMS_Delhi", 
-            priority_level=5
+            action_type="DELIVER_TO_HOSPITAL",
+            target_id="Hospital_1",
+            truck_id="Truck_1",
+            priority_level=5,
         )
         result = await env.step(action)
         print(f"Reward: {result.reward:.2f}")
@@ -60,11 +61,14 @@ if __name__ == "__main__":
 
 ## Environment Overview
 
-This environment models logistics physics tied explicitly to patient consumption:
-- Hospitals: Drain oxygen continuously based on dynamic consumption rates.
-- Time-To-Zero (TTZ): If TTZ hits 0, it triggers a Zero-Oxygen event.
-- Fleet Dynamics: Trucks carry and deliver oxygen.
-- Episode horizon: max 30 steps.
+This environment models constrained oxygen logistics with **fixed schema, real-world-style dynamics**:
+
+- **12 hospital slots** (IDs `Hospital_1` … `Hospital_12`): each has `active`, `beds`, O₂, and consumption. Inactive slots are closed (no decay); adds/removes are modeled as activate/deactivate so the observation list length stays constant.
+- **Dynamic beds**: occupied beds drift each step and scale consumption vs a `base_rate` (non-constant load on the system).
+- **Delivery lead time**: trucks enter `TRANSIT_*` with `eta_steps` and `in_transit_liters`; oxygen is credited **on arrival**, not instantly.
+- **Arrival semantics**: if a truck arrives at an **inactive** hospital, delivery is **not** applied (load retained), and the reward signal penalizes the wasted leg.
+- **Deterministic slot events**: scheduled activate/deactivate events (from episode id) stress the fleet manager without mid-flight rerouting.
+- **Episode horizon**: max 30 steps.
 
 ## OpenEnv API
 
@@ -90,21 +94,26 @@ Action schema fields:
 ## Observations
 
 ### OxygenObservation
-- Hospitals: List of hospital statuses (TTZ, SOS, etc.)
-- Fleet: truck positions and loads.
-- Suppliers: Plant stock levels.
-- message: textual status message
-- done: whether episode terminated
-- reward: normalized step reward in `[0, 1]`
+- Hospitals: fixed 12 entries with `active`, `beds`, O₂, `consumption_rate`, TTZ, SOS.
+- Fleet: load, status, `eta_steps`, `in_transit_liters`, target.
+- Suppliers: plant stock.
+- message, done, reward (dense step reward in `[0, 1]`).
 
-## Reward Structure
+## Reward Structure (dense, partial progress)
 
-| Event | Reward |
+Benchmark step reward blends:
+
+| Component | Role |
 | --- | --- |
-| Step safety ratio (hospitals > 100L) | +0.0 to +0.7 |
-| Average stock health ratio | +0.0 to +0.3 |
-| Repeated same action loop | -0.03 each repeated turn (capped) |
-| Any casualty event | immediate collapse to 0.0 |
+| Active hospital safety (O₂ above critical) | survival pressure across **active** sites only |
+| Average normalized stock | headroom vs shortage |
+| In-transit progress `(lead−eta)/lead` | partial credit while cylinders are **en route** (addresses delivery delay) |
+| Loop / repeat-action penalty | discourages stalling |
+| Busy-truck dispatch penalty | dispatch while not `IDLE` |
+| Wasted-arrival penalty | arrival at inactive / closed slot |
+| Casualties | step reward collapses to `0.0` |
+
+Final **task score** (grader) remains a separate strictly-in-`(0,1)` outcome combining survival (active hospitals), horizon, and cumulative delivered volume (`graders.py`).
 
 ## Tasks and Graders
 
@@ -114,7 +123,7 @@ Difficulty progression and deterministic graders are implemented in `graders.py`
 - `medium`: keep 4 hospitals alive and deliver more total oxygen.
 - `hard`: keep 6 hospitals alive with strict throughput requirement.
 
-Each task returns a final score in `[0.0, 1.0]` based on:
+Each task returns a final score strictly in `(0, 1)` (never exactly `0.0` or `1.0`) based on:
 - hospital survival ratio,
 - horizon durability (`step_count / max_steps`),
 - normalized delivery throughput (`total_delivered / target_liters`),
