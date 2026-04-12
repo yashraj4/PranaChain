@@ -7,48 +7,60 @@ import json
 from typing import List, Optional
 import requests
 
+from openai import OpenAI  # Fix 3: synchronous client, top-level import
+
 from prana_chain.client import PranaChainEnv
 from prana_chain.models import OxygenAction
 
+# Read environment variables with defaults where required
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_KEY = HF_TOKEN or os.getenv("API_KEY")
+
+# Fix 2: mandatory HF_TOKEN validation
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN environment variable is required")
+
+# Fix 3: initialize OpenAI client once at top level using HF_TOKEN
+client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+
 
 def log_start(task: str, env: str, model: str):
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
+
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str] = None):
     print(f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error or 'null'}", flush=True)
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]):
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}", flush=True)
 
-async def call_llm(obs) -> OxygenAction:
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI(base_url=API_BASE_URL, api_key=API_KEY or "dummy")
-    
+# Fix 1: removed `score` parameter — [END] format now matches spec exactly
+def log_end(success: bool, steps: int, rewards: List[float]):
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
+
+
+# Fix 3: synchronous call_llm using top-level `client`, not AsyncOpenAI inside function
+def call_llm(obs) -> OxygenAction:
     prompt = f"""
-    You are an emergency oxygen dispatcher. 
+    You are an emergency oxygen dispatcher.
     CURRENT STATE: {obs.message}
     HOSPITALS: {obs.Hospitals}
     FLEET: {obs.Fleet}
     SUPPLIERS: {obs.Suppliers}
-    
+
     Choose ONE action for Truck_1.
     Available actions: DELIVER_TO_HOSPITAL, DISPATCH_TO_PLANT.
     Targets: Hospital_1, Hospital_2, ..., Plant_1, Plant_2, ...
-    
+
     Return ONLY a JSON object like: {{"action_type": "...", "target_id": "..."}}
     """
-    
+
     try:
-        response = await client.chat.completions.create(
+        response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            response_format={ "type": "json_object" }
+            response_format={"type": "json_object"}
         )
         data = json.loads(response.choices[0].message.content)
         return OxygenAction(**data)
@@ -70,16 +82,18 @@ async def call_llm(obs) -> OxygenAction:
         except Exception:
             return OxygenAction(action_type="DELIVER_TO_HOSPITAL", target_id="Hospital_1")
 
+
 async def run_evaluation(task: str):
-    log_start(task=task, env="prana_chain", model=MODEL_NAME)
     step_count = 0
     done = False
     rewards: List[float] = []
-    score = 0.0
     success = False
     env = None
 
     try:
+        # Fix 4: log_start is now INSIDE the try block so [END] is always paired with it
+        log_start(task=task, env="prana_chain", model=MODEL_NAME)
+
         env = PranaChainEnv(base_url="http://127.0.0.1:8000")
         result = None
         last_err = None
@@ -94,10 +108,10 @@ async def run_evaluation(task: str):
             raise RuntimeError(str(last_err) if last_err else "reset failed")
         obs = result.observation
 
-        # 2. Episode Loop
+        # Episode Loop
         while not done and step_count < 20:
             step_count += 1
-            action = await call_llm(obs)
+            action = call_llm(obs)  # synchronous call — no await needed
 
             try:
                 result = await env.step(action)
@@ -111,7 +125,7 @@ async def run_evaluation(task: str):
                 log_step(step=step_count, action="ERROR", reward=0.0, done=True, error=str(e))
                 done = True
 
-        # 3. Final Grading
+        # Final Grading
         state = await env.state()
         score = max(0.0, min(1.0, float(state.score)))
         success = score >= 0.8
@@ -123,11 +137,14 @@ async def run_evaluation(task: str):
                 await env.close()
             except Exception:
                 pass
-        log_end(success=success, steps=step_count, score=score, rewards=rewards)
+        # Fix 1 + Fix 4: always emitted, no score field
+        log_end(success=success, steps=step_count, rewards=rewards)
+
 
 async def main():
     for t in ["easy", "medium", "hard"]:
         await run_evaluation(t)
+
 
 if __name__ == "__main__":
     server_process = None
@@ -136,10 +153,10 @@ if __name__ == "__main__":
         env_vars = os.environ.copy()
         env_vars["PYTHONUTF8"] = "1"
         env_vars["PYTHONPATH"] = os.getcwd()
-        
+
         server_log = open("server_stdout.log", "w")
         server_err = open("server_stderr.log", "w")
-        
+
         server_process = subprocess.Popen(
             [sys.executable, "-m", "prana_chain.server.app", "--port", "8000"],
             cwd=os.getcwd(),
@@ -160,7 +177,7 @@ if __name__ == "__main__":
 
         if not ready:
             print("[DEBUG] Server warmup did not reach /reset=200 before run", flush=True)
-        
+
         asyncio.run(main())
     finally:
         if server_process:

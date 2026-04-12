@@ -40,6 +40,9 @@ class PranaChainEnvironment(Environment):
         self._total_delivered = 0.0
         self._done = False
         self._task = task
+        self._is_sandbox = False
+        self._h_count = 0
+        self._t_count = 0
         self._loop_penalty_count = 0
         self._last_action_signature = None
         
@@ -53,6 +56,9 @@ class PranaChainEnvironment(Environment):
         else: # hard
             h_count, t_count, s_count = 6, 2, 2
             load_mult = 0.5
+
+        self._h_count = h_count
+        self._t_count = t_count
 
         # Initialize Hospitals
         self._hospitals = {}
@@ -88,11 +94,56 @@ class PranaChainEnvironment(Environment):
             }
 
     def reset(self, seed=None, episode_id=None, task: str = "easy", **kwargs) -> OxygenObservation:
+        # Optional sandbox controls for UI experimentation.
+        hospitals = kwargs.get("hospitals")
+        trucks = kwargs.get("trucks")
+        suppliers = kwargs.get("suppliers")
+        sandbox = bool(kwargs.get("sandbox", False))
+
         self._set_initial_state(task)
+
+        if sandbox:
+            h_count = max(2, min(12, int(hospitals or 2)))
+            t_count = max(1, min(6, int(trucks or 1)))
+            s_count = max(1, min(4, int(suppliers or 1)))
+            self._is_sandbox = True
+            self._h_count = h_count
+            self._t_count = t_count
+
+            # Rebuild a custom-size scenario with deterministic defaults.
+            self._hospitals = {}
+            for i in range(h_count):
+                h_id = f"Hospital_{i+1}"
+                self._hospitals[h_id] = {
+                    "o2": random.uniform(450, 950),
+                    "rate": random.uniform(25, 55),
+                    "patients": random.randint(40, 220),
+                    "sos": "Stock dipping."
+                }
+            self._fleet = {}
+            for i in range(t_count):
+                t_id = f"Truck_{i+1}"
+                self._fleet[t_id] = {
+                    "load": 5000.0 if i == 0 else 0.0,
+                    "cap": 10000.0,
+                    "loc": "Plant_1",
+                    "target": None,
+                    "status": "IDLE"
+                }
+            self._suppliers = {}
+            for i in range(s_count):
+                s_id = f"Plant_{i+1}"
+                self._suppliers[s_id] = {"stock": 50000.0, "rate": 1000.0}
+
         obs = self._make_observation(f"Emergency Dispatch Protocol Active. Difficulty: {task.upper()}")
         obs.reward = 0.0
         obs.done = False
-        obs.metadata = {"task": task, "grader_score": 0.0}
+        obs.metadata = {
+            "task": task,
+            "grader_score": 0.0,
+            "sandbox": self._is_sandbox,
+            "counts": {"hospitals": self._h_count, "trucks": self._t_count},
+        }
         return obs
 
     def step(self, action: OxygenAction, timeout_s=None, **kwargs) -> OxygenObservation:
@@ -167,11 +218,16 @@ class PranaChainEnvironment(Environment):
             self._done = True
 
         # 3. Reward / Scoring (Normalized to [0, 1])
-        reward = self._calculate_normalized_reward()
+        reward = self._calculate_size_aware_reward() if self._is_sandbox else self._calculate_normalized_reward()
         obs = self._make_observation("Simulation in progress..." if not self._done else "Simulation Terminated.")
         obs.reward = reward
         obs.done = self._done
-        obs.metadata = {"task": self._task, "grader_score": self._calculate_final_score()}
+        obs.metadata = {
+            "task": self._task,
+            "grader_score": self._calculate_final_score(),
+            "sandbox": self._is_sandbox,
+            "counts": {"hospitals": self._h_count, "trucks": self._t_count},
+        }
         return obs
 
     def _calculate_normalized_reward(self) -> float:
@@ -184,6 +240,32 @@ class PranaChainEnvironment(Environment):
         ) / len(self._hospitals)
         loop_penalty = min(self._loop_penalty_count * 0.03, 0.3)
         reward = (0.7 * safety_ratio) + (0.3 * avg_stock_ratio) - loop_penalty
+        return round(max(0.0, min(1.0, reward)), 2)
+
+    def _calculate_size_aware_reward(self) -> float:
+        """
+        Sandbox reward normalized across variable topology sizes.
+        Keeps values in [0, 1] while accounting for system scale.
+        """
+        if self._casualties > 0:
+            return 0.0
+        safe_hospitals = sum(1 for h in self._hospitals.values() if h["o2"] > 120)
+        safety_ratio = safe_hospitals / max(1, len(self._hospitals))
+        avg_stock_ratio = sum(
+            min(h["o2"] / 1000.0, 1.0) for h in self._hospitals.values()
+        ) / max(1, len(self._hospitals))
+        truck_load_ratio = sum(
+            min(max(t["load"], 0.0) / max(t["cap"], 1.0), 1.0) for t in self._fleet.values()
+        ) / max(1, len(self._fleet))
+        # Scale loop penalty by number of controllable resources.
+        scale = max(1.0, len(self._hospitals) / max(1, len(self._fleet)))
+        loop_penalty = min((self._loop_penalty_count * 0.02) * scale, 0.35)
+        reward = (
+            0.55 * safety_ratio
+            + 0.25 * avg_stock_ratio
+            + 0.20 * truck_load_ratio
+            - loop_penalty
+        )
         return round(max(0.0, min(1.0, reward)), 2)
 
     def _calculate_final_score(self) -> float:

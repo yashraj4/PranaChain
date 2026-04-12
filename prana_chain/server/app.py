@@ -59,9 +59,25 @@ def root():
           <option value="medium">medium</option>
           <option value="hard">hard</option>
         </select>
+        <label class="muted" style="margin-left:8px;">Mode:</label>
+        <select id="mode">
+          <option value="benchmark">benchmark</option>
+          <option value="sandbox">sandbox</option>
+        </select>
         <button onclick="resetEnv()">Reset</button>
         <button onclick="stepPolicy()">Step Heuristic</button>
         <button onclick="toggleAuto()" id="autoBtn">Start Auto</button>
+        <div style="margin-top:10px;">
+          <span class="muted">Hospitals</span>
+          <input id="hospitals" type="range" min="2" max="12" value="4" oninput="document.getElementById('hVal').textContent=this.value" />
+          <span id="hVal">4</span>
+          <span class="muted" style="margin-left:10px;">Trucks</span>
+          <input id="trucks" type="range" min="1" max="6" value="2" oninput="document.getElementById('tVal').textContent=this.value" />
+          <span id="tVal">2</span>
+          <span class="muted" style="margin-left:10px;">Plants</span>
+          <input id="suppliers" type="range" min="1" max="4" value="2" oninput="document.getElementById('sVal').textContent=this.value" />
+          <span id="sVal">2</span>
+        </div>
       </div>
       <div class="panel grow">
         <h3>Episode Metrics</h3>
@@ -136,14 +152,22 @@ def root():
 
     async function resetEnv() {
       const task = document.getElementById('task').value;
-      const res = await fetch('/reset', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ task }) });
+      const mode = document.getElementById('mode').value;
+      const payload = { task };
+      if (mode === 'sandbox') {
+        payload.sandbox = true;
+        payload.hospitals = Number(document.getElementById('hospitals').value);
+        payload.trucks = Number(document.getElementById('trucks').value);
+        payload.suppliers = Number(document.getElementById('suppliers').value);
+      }
+      const res = await fetch('/reset', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
       const data = await res.json();
       obs = data.observation;
       stepN = 0;
       isDone = false;
       lastReward = 0;
       document.getElementById('action').textContent = '-';
-      addLog(`Reset task=${task}`);
+      addLog(`Reset task=${task} mode=${mode}`);
       render();
     }
 
