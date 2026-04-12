@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Upload repo root to Hugging Face Space (requires HF_TOKEN in environment)."""
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +16,16 @@ def main() -> int:
     if not token:
         print("Set HF_TOKEN, then run: python scripts/sync_hf_space.py", file=sys.stderr)
         return 1
+
+    check = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "pre_deploy_check.py")],
+        cwd=str(ROOT),
+        env={**os.environ, "PYTHONUTF8": "1", "HF_TOKEN": token, "PRANA_INFERENCE_OFFLINE": "1"},
+    )
+    if check.returncode != 0:
+        print("pre_deploy_check.py failed — fix before upload.", file=sys.stderr)
+        return 1
+
     api = HfApi(token=token)
     api.upload_folder(
         repo_id=REPO_ID,

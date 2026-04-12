@@ -36,6 +36,9 @@ class OxygenObservation(Observation):
     Fleet: List[TruckStatus]
     Suppliers: List[SupplyNode]
     message: str
+    # Included in HTTP JSON (OpenEnv strips observation.metadata from wire format).
+    env_layout: Optional[str] = None  # "task_default" | "custom"
+    reward_components: Optional[Dict[str, float]] = None
 
 
 class OxygenAction(Action):

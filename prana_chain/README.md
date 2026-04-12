@@ -127,7 +127,7 @@ Each task returns a final score strictly in `(0, 1)` (never exactly `0.0` or `1.
 - hospital survival ratio,
 - horizon durability (`step_count / max_steps`),
 - normalized delivery throughput (`total_delivered / target_liters`),
-- zero score on casualties.
+- worst score (`SCORE_MIN`) on casualties (still strictly inside `(0,1)`).
 
 ## Baseline Inference
 

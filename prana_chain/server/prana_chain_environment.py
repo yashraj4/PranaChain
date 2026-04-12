@@ -58,7 +58,7 @@ class PranaChainEnvironment(Environment):
         self._total_delivered = 0.0
         self._done = False
         self._task = task
-        self._is_sandbox = False
+        self._custom_layout = False
         self._h_count = 0
         self._t_count = 0
         self._loop_penalty_count = 0
@@ -165,18 +165,25 @@ class PranaChainEnvironment(Environment):
                 data["patients"] = rng.randint(60, 180)
 
     def reset(self, seed=None, episode_id=None, task: str = "easy", **kwargs) -> OxygenObservation:
-        hospitals = kwargs.get("hospitals")
-        trucks = kwargs.get("trucks")
-        suppliers = kwargs.get("suppliers")
-        sandbox = bool(kwargs.get("sandbox", False))
-
         self._set_initial_state(task)
+        dh, dt, ds = self._h_count, self._t_count, len(self._suppliers)
 
-        if sandbox:
-            initial_active = max(2, min(MAX_HOSPITAL_SLOTS, int(hospitals or 2)))
-            t_count = max(1, min(6, int(trucks or 1)))
-            s_count = max(1, min(4, int(suppliers or 1)))
-            self._is_sandbox = True
+        layout_keys = ("hospitals", "trucks", "suppliers")
+        has_any_layout_key = any(k in kwargs for k in layout_keys)
+        req_h = int(kwargs["hospitals"]) if "hospitals" in kwargs else dh
+        req_t = int(kwargs["trucks"]) if "trucks" in kwargs else dt
+        req_s = int(kwargs["suppliers"]) if "suppliers" in kwargs else ds
+        req_h = max(2, min(MAX_HOSPITAL_SLOTS, req_h))
+        req_t = max(1, min(6, req_t))
+        req_s = max(1, min(4, req_s))
+
+        custom_needed = has_any_layout_key and (req_h, req_t, req_s) != (dh, dt, ds)
+
+        if custom_needed:
+            initial_active = req_h
+            t_count = req_t
+            s_count = req_s
+            self._custom_layout = True
             self._h_count = initial_active
             self._t_count = t_count
 
@@ -224,14 +231,23 @@ class PranaChainEnvironment(Environment):
                 self._suppliers[s_id] = {"stock": 50000.0, "rate": 1000.0}
             self._slot_events = self._build_slot_events()
 
-        obs = self._make_observation(f"Emergency Dispatch Protocol Active. Difficulty: {task.upper()}")
+        layout = "custom" if self._custom_layout else "task_default"
+        obs = self._make_observation(
+            f"Emergency Dispatch Protocol Active. Difficulty: {task.upper()}",
+            env_layout=layout,
+            reward_components=None,
+        )
         obs.reward = 0.0
         obs.done = False
         obs.metadata = {
             "task": task,
             "grader_score": self._calculate_final_score(),
-            "sandbox": self._is_sandbox,
-            "counts": {"hospitals": self._h_count, "trucks": self._t_count},
+            "layout": layout,
+            "counts": {
+                "hospitals": self._h_count,
+                "trucks": self._t_count,
+                "suppliers": len(self._suppliers),
+            },
             "slots": MAX_HOSPITAL_SLOTS,
         }
         return obs
@@ -268,13 +284,19 @@ class PranaChainEnvironment(Environment):
 
     def step(self, action: OxygenAction, timeout_s=None, **kwargs) -> OxygenObservation:
         if self._done:
-            obs = self._make_observation("Episode finished.")
+            layout = "custom" if self._custom_layout else "task_default"
+            obs = self._make_observation(
+                "Episode finished.",
+                env_layout=layout,
+                reward_components={},
+            )
             obs.reward = 0.0
             obs.done = True
             obs.metadata = {
                 "task": self._task,
                 "grader_score": self._calculate_final_score(),
-                "sandbox": self._is_sandbox,
+                "layout": layout,
+                "reward_components": {},
             }
             return obs
 
@@ -349,32 +371,68 @@ class PranaChainEnvironment(Environment):
             data["beds"] = int(max(25, min(220, data["beds"] + delta)))
             data["rate"] = data["base_rate"] * (data["beds"] / 80.0)
 
-        reward = (
-            self._calculate_size_aware_reward()
-            if self._is_sandbox
-            else self._calculate_progressive_reward()
+        reward, reward_components = self._progressive_reward_detail()
+        layout = "custom" if self._custom_layout else "task_default"
+        obs = self._make_observation(
+            "Simulation in progress..." if not self._done else "Simulation Terminated.",
+            env_layout=layout,
+            reward_components=reward_components,
         )
-        obs = self._make_observation("Simulation in progress..." if not self._done else "Simulation Terminated.")
         obs.reward = reward
         obs.done = self._done
         obs.metadata = {
             "task": self._task,
             "grader_score": self._calculate_final_score(),
-            "sandbox": self._is_sandbox,
-            "counts": {"hospitals": self._h_count, "trucks": self._t_count},
+            "layout": layout,
+            "counts": {
+                "hospitals": self._h_count,
+                "trucks": self._t_count,
+                "suppliers": len(self._suppliers),
+            },
             "slots": MAX_HOSPITAL_SLOTS,
+            "reward_components": reward_components,
         }
         return obs
 
     def _active_hospitals(self) -> List[Dict[str, Any]]:
         return [h for h in self._hospitals.values() if h["active"]]
 
-    def _calculate_progressive_reward(self) -> float:
+    def _progressive_reward_detail(self) -> Tuple[float, Dict[str, float]]:
+        """
+        Dense step reward (rounded to 2 dp for API) plus unrounded / term breakdown in metadata.
+        """
         if self._casualties > 0:
-            return 0.0
+            return 0.0, {
+                "safety_ratio": 0.0,
+                "stock": 0.0,
+                "transit_progress": 0.0,
+                "loop_penalty": 0.0,
+                "waste_penalty": 0.0,
+                "busy_penalty": 0.0,
+                "term_safety": 0.0,
+                "term_stock": 0.0,
+                "term_transit": 0.0,
+                "pre_clamp": 0.0,
+                "clamped_unrounded": 0.0,
+            }
         active = self._active_hospitals()
         if not active:
-            return 0.05
+            pre = 0.05
+            clamped = max(0.0, min(1.0, pre))
+            return round(clamped, 2), {
+                "safety_ratio": 0.0,
+                "stock": 0.0,
+                "transit_progress": 0.0,
+                "loop_penalty": 0.0,
+                "waste_penalty": 0.0,
+                "busy_penalty": 0.0,
+                "term_safety": 0.0,
+                "term_stock": 0.0,
+                "term_transit": 0.0,
+                "pre_clamp": round(pre, 6),
+                "clamped_unrounded": round(clamped, 6),
+            }
+
         critical = 120.0
         safe = sum(1 for h in active if h["o2"] > critical)
         safety_ratio = safe / len(active)
@@ -392,49 +450,27 @@ class PranaChainEnvironment(Environment):
         waste_penalty = 0.12 if self._wasted_arrival_step else 0.0
         busy_penalty = 0.06 if self._ignored_busy_dispatch else 0.0
 
-        reward = (
-            0.48 * safety_ratio
-            + 0.27 * stock
-            + 0.20 * transit_progress
-            - loop_penalty
-            - waste_penalty
-            - busy_penalty
-        )
-        return round(max(0.0, min(1.0, reward)), 2)
+        term_safety = 0.48 * safety_ratio
+        term_stock = 0.27 * stock
+        term_transit = 0.20 * transit_progress
+        pre_clamp = term_safety + term_stock + term_transit - loop_penalty - waste_penalty - busy_penalty
+        clamped = max(0.0, min(1.0, pre_clamp))
+        rounded = round(clamped, 2)
 
-    def _calculate_size_aware_reward(self) -> float:
-        if self._casualties > 0:
-            return 0.0
-        active = self._active_hospitals()
-        if not active:
-            return 0.05
-        safe = sum(1 for h in active if h["o2"] > 130)
-        safety_ratio = safe / len(active)
-        stock = sum(min(h["o2"] / 1000.0, 1.0) for h in active) / len(active)
-        truck_load_ratio = sum(
-            min(max(t["load"], 0.0) / max(t["cap"], 1.0), 1.0) for t in self._fleet.values()
-        ) / max(1, len(self._fleet))
-        transit_scores = []
-        for t in self._fleet.values():
-            if t["status"] in ("TRANSIT_TO_HOSPITAL", "TRANSIT_TO_PLANT") and t.get("lead", 0) > 0:
-                lead = max(1, int(t["lead"]))
-                eta = max(0, int(t["eta"]))
-                transit_scores.append((lead - eta) / lead)
-        transit_progress = sum(transit_scores) / max(1, len(self._fleet)) if transit_scores else 0.0
-        scale = max(1.0, len(active) / max(1, len(self._fleet)))
-        loop_penalty = min((self._loop_penalty_count * 0.02) * scale, 0.3)
-        waste_penalty = 0.1 if self._wasted_arrival_step else 0.0
-        busy_penalty = 0.05 if self._ignored_busy_dispatch else 0.0
-        reward = (
-            0.42 * safety_ratio
-            + 0.20 * stock
-            + 0.18 * truck_load_ratio
-            + 0.15 * transit_progress
-            - loop_penalty
-            - waste_penalty
-            - busy_penalty
-        )
-        return round(max(0.0, min(1.0, reward)), 2)
+        components: Dict[str, float] = {
+            "safety_ratio": round(safety_ratio, 4),
+            "stock": round(stock, 4),
+            "transit_progress": round(transit_progress, 4),
+            "loop_penalty": round(loop_penalty, 4),
+            "waste_penalty": round(waste_penalty, 4),
+            "busy_penalty": round(busy_penalty, 4),
+            "term_safety": round(term_safety, 4),
+            "term_stock": round(term_stock, 4),
+            "term_transit": round(term_transit, 4),
+            "pre_clamp": round(pre_clamp, 6),
+            "clamped_unrounded": round(clamped, 6),
+        }
+        return rounded, components
 
     def _calculate_final_score(self) -> float:
         return grade_episode(
@@ -459,7 +495,12 @@ class PranaChainEnvironment(Environment):
             score=round(final_score, 3),
         )
 
-    def _make_observation(self, message: str) -> OxygenObservation:
+    def _make_observation(
+        self,
+        message: str,
+        env_layout: Optional[str] = None,
+        reward_components: Optional[Dict[str, float]] = None,
+    ) -> OxygenObservation:
         h_list = []
         for k in self._slot_ids():
             v = self._hospitals[k]
@@ -500,4 +541,11 @@ class PranaChainEnvironment(Environment):
             SupplyNode(id=k, available_stock=v["stock"], replenishment_rate=v["rate"])
             for k, v in self._suppliers.items()
         ]
-        return OxygenObservation(Hospitals=h_list, Fleet=t_list, Suppliers=s_list, message=message)
+        return OxygenObservation(
+            Hospitals=h_list,
+            Fleet=t_list,
+            Suppliers=s_list,
+            message=message,
+            env_layout=env_layout,
+            reward_components=reward_components,
+        )

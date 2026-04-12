@@ -25,6 +25,8 @@ if HF_TOKEN is None:
 # Fix 3: initialize OpenAI client once at top level using HF_TOKEN
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
+_INFERENCE_OFFLINE = os.getenv("PRANA_INFERENCE_OFFLINE", "").lower() in ("1", "true", "yes")
+
 
 def log_start(task: str, env: str, model: str):
     print(f"[START] task={task} env={env} model={model}", flush=True)
@@ -34,28 +36,94 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     print(f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error or 'null'}", flush=True)
 
 
-# Fix 1: removed `score` parameter — [END] format now matches spec exactly
-def log_end(success: bool, steps: int, rewards: List[float]):
+def log_end(success: bool, steps: int, score: float, rewards: List[float]):
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
+    # Use 3 decimals for score so grader floor (e.g. 0.001) is not shown as 0.00
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def _fallback_dispatch(obs) -> OxygenAction:
+    """Deterministic policy when LLM is unavailable or PRANA_INFERENCE_OFFLINE=1."""
+    try:
+        idle = [t for t in obs.Fleet if t.status == "IDLE"]
+        truck = idle[0] if idle else obs.Fleet[0]
+        tid = truck.id
+        if truck.status != "IDLE":
+            return OxygenAction(
+                action_type="DELIVER_TO_HOSPITAL",
+                truck_id=tid,
+                target_id="Hospital_1",
+            )
+        if truck.current_load < 1200:
+            plant_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
+            return OxygenAction(action_type="DISPATCH_TO_PLANT", truck_id=tid, target_id=plant_id)
+
+        active_hs = [h for h in obs.Hospitals if getattr(h, "active", True)]
+        if not active_hs:
+            plant_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
+            return OxygenAction(action_type="DISPATCH_TO_PLANT", truck_id=tid, target_id=plant_id)
+        critical = min(active_hs, key=lambda h: (h.time_to_zero, h.current_o2_liters))
+        return OxygenAction(
+            action_type="DELIVER_TO_HOSPITAL",
+            truck_id=tid,
+            target_id=critical.id,
+        )
+    except Exception:
+        return OxygenAction(action_type="DELIVER_TO_HOSPITAL", target_id="Hospital_1")
 
 
 # Fix 3: synchronous call_llm using top-level `client`, not AsyncOpenAI inside function
 def call_llm(obs) -> OxygenAction:
-    prompt = f"""
-    You are an emergency oxygen dispatcher.
-    CURRENT STATE: {obs.message}
-    HOSPITALS: {obs.Hospitals}
-    FLEET: {obs.Fleet}
-    SUPPLIERS: {obs.Suppliers}
+    if _INFERENCE_OFFLINE:
+        return _fallback_dispatch(obs)
 
-    Choose ONE action for one truck: include truck_id (e.g. Truck_1) and target_id.
-    Only hospitals with active=true receive oxygen; inactive slots are closed.
-    Delivery takes multiple steps in transit (see Fleet eta_steps).
-    Available actions: DELIVER_TO_HOSPITAL, DISPATCH_TO_PLANT.
+    # Build structured context so the LLM makes smart decisions
+    active_hospitals = [h for h in obs.Hospitals if getattr(h, "active", True)]
+    active_hospitals_sorted = sorted(active_hospitals, key=lambda h: getattr(h, "time_to_zero", 999))
 
-    Return ONLY a JSON object like: {{"action_type": "...", "target_id": "...", "truck_id": "Truck_1"}}
-    """
+    truck = obs.Fleet[0] if obs.Fleet else None
+    truck_load = getattr(truck, "current_load", 0)
+    truck_cap = getattr(truck, "capacity", 10000)
+    truck_pct = int(100 * truck_load / truck_cap) if truck_cap else 0
+    truck_status = getattr(truck, "status", "IDLE")
+    truck_id = getattr(truck, "id", "Truck_1")
+
+    supplier_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
+    most_critical = active_hospitals_sorted[0] if active_hospitals_sorted else None
+    critical_id = getattr(most_critical, "id", "Hospital_1") if most_critical else "Hospital_1"
+    critical_ttz = getattr(most_critical, "time_to_zero", 999) if most_critical else 999
+
+    hospital_summary = "\n".join(
+        f"  {getattr(h,'id','')} | O2={getattr(h,'current_o2_liters',0):.0f}L | TTZ={getattr(h,'time_to_zero',999):.1f}h ← MOST CRITICAL" 
+        if i == 0 else
+        f"  {getattr(h,'id','')} | O2={getattr(h,'current_o2_liters',0):.0f}L | TTZ={getattr(h,'time_to_zero',999):.1f}h"
+        for i, h in enumerate(active_hospitals_sorted)
+    )
+
+    refuel_warning = ""
+    if truck_pct < 30:
+        refuel_warning = f"\n⚠️  TRUCK LOAD CRITICAL ({truck_pct}%). You MUST dispatch to {supplier_id} to refuel before hospitals run out."
+
+    prompt = f"""You are an emergency oxygen dispatcher. Make the single best dispatch decision.
+
+TRUCK STATUS:
+  ID: {truck_id} | Load: {truck_load:.0f}L / {truck_cap:.0f}L ({truck_pct}%) | Status: {truck_status}{refuel_warning}
+
+ACTIVE HOSPITALS (sorted by urgency — lowest TTZ = most critical):
+{hospital_summary}
+
+SUPPLIER: {supplier_id}
+
+DECISION RULES (follow in order):
+1. If truck load < 30% OR truck is empty → DISPATCH_TO_PLANT to {supplier_id}
+2. If truck is IDLE and a hospital has TTZ < 15h → DELIVER_TO_HOSPITAL to the most critical one
+3. Otherwise → DELIVER_TO_HOSPITAL to {critical_id} (TTZ={critical_ttz:.1f}h)
+
+Return ONLY valid JSON (no explanation):
+{{"action_type": "DELIVER_TO_HOSPITAL or DISPATCH_TO_PLANT", "target_id": "<hospital_or_plant_id>", "truck_id": "{truck_id}"}}"""
 
     try:
         response = client.chat.completions.create(
@@ -67,42 +135,14 @@ def call_llm(obs) -> OxygenAction:
         data = json.loads(response.choices[0].message.content)
         return OxygenAction(**data)
     except Exception:
-        # Deterministic fallback policy:
-        # 1) Refill when truck is empty/low.
-        # 2) Otherwise deliver to the most critical hospital.
-        try:
-            idle = [t for t in obs.Fleet if t.status == "IDLE"]
-            truck = idle[0] if idle else obs.Fleet[0]
-            tid = truck.id
-            if truck.status != "IDLE":
-                return OxygenAction(
-                    action_type="DELIVER_TO_HOSPITAL",
-                    truck_id=tid,
-                    target_id="Hospital_1",
-                )
-            if truck.current_load < 1200:
-                plant_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
-                return OxygenAction(action_type="DISPATCH_TO_PLANT", truck_id=tid, target_id=plant_id)
-
-            active_hs = [h for h in obs.Hospitals if getattr(h, "active", True)]
-            if not active_hs:
-                plant_id = obs.Suppliers[0].id if obs.Suppliers else "Plant_1"
-                return OxygenAction(action_type="DISPATCH_TO_PLANT", truck_id=tid, target_id=plant_id)
-            critical = min(active_hs, key=lambda h: (h.time_to_zero, h.current_o2_liters))
-            return OxygenAction(
-                action_type="DELIVER_TO_HOSPITAL",
-                truck_id=tid,
-                target_id=critical.id,
-            )
-        except Exception:
-            return OxygenAction(action_type="DELIVER_TO_HOSPITAL", target_id="Hospital_1")
+        return _fallback_dispatch(obs)
 
 
 async def run_evaluation(task: str):
-    step_count = 0
     done = False
     rewards: List[float] = []
     success = False
+    score = 0.0
     env = None
 
     try:
@@ -123,9 +163,8 @@ async def run_evaluation(task: str):
             raise RuntimeError(str(last_err) if last_err else "reset failed")
         obs = result.observation
 
-        # Episode Loop
-        while not done and step_count < 20:
-            step_count += 1
+        # Episode Loop — one [STEP] line per rewards entry so [END] steps == len(rewards)
+        while not done and len(rewards) < 20:
             action = call_llm(obs)  # synchronous call — no await needed
 
             try:
@@ -135,25 +174,36 @@ async def run_evaluation(task: str):
                 reward = float(result.reward or 0.0)
                 rewards.append(reward)
                 action_text = f"{action.action_type}:{action.target_id}"
-                log_step(step=step_count, action=action_text, reward=reward, done=done)
+                log_step(step=len(rewards), action=action_text, reward=reward, done=done)
             except Exception as e:
-                log_step(step=step_count, action="ERROR", reward=0.0, done=True, error=str(e))
+                rewards.append(0.0)
+                log_step(
+                    step=len(rewards),
+                    action="ERROR",
+                    reward=0.0,
+                    done=True,
+                    error=str(e),
+                )
                 done = True
 
-        # Final Grading
-        state = await env.state()
-        score = max(SCORE_MIN, min(SCORE_MAX, float(state.score)))
-        success = score >= 0.8
+        # Final Grading (no extra [STEP] on failure — keep steps == len(rewards))
+        try:
+            state = await env.state()
+            score = max(SCORE_MIN, min(SCORE_MAX, float(state.score)))
+            success = score >= 0.8
+        except Exception:
+            score = SCORE_MIN
+            success = False
     except Exception as e:
-        log_step(step=max(1, step_count + 1), action="ERROR", reward=0.0, done=True, error=str(e))
+        rewards.append(0.0)
+        log_step(step=len(rewards), action="ERROR", reward=0.0, done=True, error=str(e))
     finally:
         if env is not None:
             try:
                 await env.close()
             except Exception:
                 pass
-        # Fix 1 + Fix 4: always emitted, no score field
-        log_end(success=success, steps=step_count, rewards=rewards)
+        log_end(success=success, steps=len(rewards), score=score, rewards=rewards)
 
 
 async def main():
